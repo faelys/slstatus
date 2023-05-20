@@ -6,7 +6,10 @@
 #include "../slstatus.h"
 #include "../util.h"
 
+#define MAX_CPU 16
+
 #if defined(__linux__)
+	#include <stdlib.h>
 	#define CPU_FREQ "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"
 
 	const char *
@@ -46,6 +49,75 @@
 		return bprintf("%d", (int)(100 *
 		               ((b[0] + b[1] + b[2] + b[5] + b[6]) -
 		                (a[0] + a[1] + a[2] + a[5] + a[6])) / sum));
+	}
+
+	const char *
+	cpu_perc_sum(const char *unused)
+	{
+		static long long a[MAX_CPU][2];
+		long long b[MAX_CPU][2];
+		long long c[7];
+		long long numerator, denominator, result = 0;
+		int i;
+		unsigned j;
+		FILE *fp;
+		static char *buf;
+		static size_t bufsize;
+		char *begin, *end;
+
+		memcpy(b, a, sizeof(b));
+
+		if (!(fp = fopen("/proc/stat", "r"))) {
+			warn("fopen '/proc/stat':");
+			return NULL;
+		}
+
+		i = 0;
+		for (;;) {
+			if (getline(&buf, &bufsize, fp) < 0) {
+				warn("getline in /proc/stat:");
+				break;
+			}
+
+			if (i >= MAX_CPU ||
+			    buf[0] != 'c' || buf[1] != 'p' || buf[2] != 'u')
+				break;
+
+			if (buf[3] == ' ')
+				continue;
+
+			for (begin = buf + 4; *begin >= '0' && *begin <= '9'; begin++);
+
+			for (j = 0; j < LEN(c); j++) {
+				if (*begin != ' ') break;
+				c[j] = strtoll(begin, &end, 10);
+				begin = end;
+			}
+
+			if (j < LEN(c)) {
+				warn("Incorrect /proc/stat line %d: \"%s\"",
+				    i + 1, buf);
+				break;
+			}
+
+			a[i][0] = c[0] + c[1] + c[2] + c[5] + c[6];
+			a[i][1] = a[i][0] + c[3] + c[4];
+
+			denominator = a[i][1] - b[i][1];
+			numerator = a[i][0] - b[i][0];
+			if (denominator > 0)
+				result += (100 * numerator + denominator / 2) /
+				    denominator;
+
+			i++;
+		}
+
+		fclose(fp);
+
+		if (i == 0 || b[0][0] == 0)
+			return NULL;
+
+		return bprintf("%Ld", result);
 	}
 #elif defined(__OpenBSD__)
 	#include <sys/param.h>
@@ -153,5 +225,54 @@
 		                 a[CP_INTR]) -
 		                (b[CP_USER] + b[CP_NICE] + b[CP_SYS] +
 		                 b[CP_INTR])) / sum);
+	}
+
+	const char *
+	cpu_perc_sum(const char *unused)
+	{
+		size_t size, cpus;
+		static long a[MAX_CPU][2];
+		long b[MAX_CPU][2];
+		long c[MAX_CPU][CPUSTATES];
+		long numerator, denominator, result = 0;
+		static int mib[4];
+		static size_t mib_len = LEN(mib);
+		int i;
+
+		if (!mib[0] &&
+		    sysctlnametomib("kern.cp_times", mib, &mib_len) < 0) {
+			warn("sysctlnametomib 'kern.cp_times':");
+			return NULL;
+		}
+
+		size = sizeof(c);
+		memcpy(b, a, sizeof(b));
+		if (sysctl(mib, mib_len, &c, &size, NULL, 0) < 0 || !size) {
+			warn("sysctl 'kern.cp_times':");
+			return NULL;
+		}
+
+		cpus = size / (CPUSTATES * sizeof(long));
+		if (cpus == 0 || cpus * CPUSTATES * sizeof(long) != size) {
+			warn("cpu_perc_sum: Inconsistent size %zu for %zu cpus", size, cpus);
+			return NULL;
+		}
+
+		for (i = 0; i < (int)cpus; i++) {
+			a[i][0] = c[i][CP_USER] + c[i][CP_NICE] +
+			    c[i][CP_SYS] + c[i][CP_INTR];
+			a[i][1] = a[i][0] + c[i][CP_IDLE];
+
+			denominator = a[i][1] - b[i][1];
+			numerator = a[i][0] - b[i][0];
+			if (denominator > 0)
+				result += (100 * numerator + denominator / 2) /
+				    denominator;
+		}
+
+		if (b[0][0] == 0)
+			return NULL;
+
+		return bprintf("%ld", result);
 	}
 #endif
