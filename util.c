@@ -114,6 +114,9 @@ fmt_human(uintmax_t num, int base)
 		return NULL;
 	}
 
+	if (num < (uintmax_t)base)
+		return bprintf("%d", (int)num);
+
 	scaled = num;
 	for (i = 0; i < prefixlen && scaled >= base; i++)
 		scaled /= base;
